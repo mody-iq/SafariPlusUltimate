@@ -2,11 +2,13 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-3";
+static NSString *const kSPGuardVersion = @"1.0.0-4";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
 static char kSPInstalledKey;
+
+typedef void (^SPDecisionHandler)(WKNavigationActionPolicy, WKWebpagePreferences *);
 
 static id SP_GlobalVal(NSString *key) {
     CFPropertyListRef cf = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
@@ -80,6 +82,124 @@ static BOOL SP_GuardBegin(void) {
     } @catch (NSException *e) {
         return NO;
     }
+}
+
+static NSString *SP_NormalizeHost(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) {
+        return @"";
+    }
+    NSString *t = [[s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+                   lowercaseString];
+    if (t.length == 0) {
+        return @"";
+    }
+    NSRange r = [t rangeOfString:@"://"];
+    if (r.location != NSNotFound) {
+        t = [t substringFromIndex:NSMaxRange(r)];
+    }
+    NSRange sl = [t rangeOfString:@"/"];
+    if (sl.location != NSNotFound) {
+        t = [t substringToIndex:sl.location];
+    }
+    NSRange co = [t rangeOfString:@":"];
+    if (co.location != NSNotFound) {
+        t = [t substringToIndex:co.location];
+    }
+    if ([t hasPrefix:@"www."]) {
+        t = [t substringFromIndex:4];
+    }
+    return t;
+}
+
+static NSArray *SP_DesktopHosts(void) {
+    id v = SP_RawPref(@"SPPlusDesktopSites");
+    if (![v isKindOfClass:[NSString class]]) {
+        return @[];
+    }
+    NSCharacterSet *seps = [NSCharacterSet characterSetWithCharactersInString:@",;\u060C\n\r\t "];
+    NSArray *parts = [(NSString *)v componentsSeparatedByCharactersInSet:seps];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *p in parts) {
+        NSString *h = SP_NormalizeHost(p);
+        if (h.length > 0) {
+            [out addObject:h];
+        }
+    }
+    return out;
+}
+
+static BOOL SP_HostWantsDesktop(NSString *host) {
+    NSString *h = SP_NormalizeHost(host);
+    if (h.length == 0) {
+        return NO;
+    }
+    for (NSString *e in SP_DesktopHosts()) {
+        if ([h isEqualToString:e] || [h hasSuffix:[@"." stringByAppendingString:e]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void SP_PatchDelegateClass(Class cls) {
+    if (!cls) {
+        return;
+    }
+    static NSMutableSet *done = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        done = [NSMutableSet set];
+    });
+    NSString *name = NSStringFromClass(cls);
+    @synchronized (done) {
+        if ([done containsObject:name]) {
+            return;
+        }
+        [done addObject:name];
+    }
+
+    SEL sel = @selector(webView:decidePolicyForNavigationAction:preferences:decisionHandler:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    const char *types = method_getTypeEncoding(m);
+    if (!orig || !types) {
+        return;
+    }
+
+    IMP newImp = imp_implementationWithBlock(
+        ^(id self_, WKWebView *wv, WKNavigationAction *action, WKWebpagePreferences *prefs,
+          SPDecisionHandler handler) {
+            BOOL should = NO;
+            @try {
+                BOOL isMain = (!action.targetFrame || action.targetFrame.isMainFrame);
+                NSString *host = action.request.URL.host;
+                should = (isMain && host.length > 0 && SP_HostWantsDesktop(host));
+            } @catch (NSException *e) {
+                should = NO;
+            }
+
+            SPDecisionHandler wrapped = handler;
+            if (should && handler) {
+                wrapped = ^(WKNavigationActionPolicy policy, WKWebpagePreferences *pp) {
+                    WKWebpagePreferences *use = pp;
+                    if (!use) {
+                        use = prefs;
+                    }
+                    if (!use) {
+                        use = [[WKWebpagePreferences alloc] init];
+                    }
+                    use.preferredContentMode = WKContentModeDesktop;
+                    handler(policy, use);
+                };
+            }
+
+            ((void (*)(id, SEL, WKWebView *, WKNavigationAction *, WKWebpagePreferences *,
+                       SPDecisionHandler))orig)(self_, sel, wv, action, prefs, wrapped);
+        });
+    class_replaceMethod(cls, sel, newImp, types);
 }
 
 static NSString *SP_ForceCopyJS(void) {
@@ -186,6 +306,21 @@ static void SP_InstallScripts(WKWebView *wv) {
 
 %end
 
+%group SPDesktop
+
+%hook WKWebView
+
+- (void)setNavigationDelegate:(id<WKNavigationDelegate>)delegate {
+    %orig;
+    if (delegate) {
+        SP_PatchDelegateClass([(NSObject *)delegate class]);
+    }
+}
+
+%end
+
+%end
+
 %ctor {
     @autoreleasepool {
         if (![[[NSProcessInfo processInfo] processName] isEqualToString:@"MobileSafari"]) {
@@ -204,5 +339,8 @@ static void SP_InstallScripts(WKWebView *wv) {
             return;
         }
         %init(SPWebKit);
+        if (SP_Pref(@"SPPlusDesktop", YES)) {
+            %init(SPDesktop);
+        }
     }
 }

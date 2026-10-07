@@ -1,0 +1,9 @@
+Package: com.mody.safariplusultimate
+Name: SafariPlusUltimate
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: Powerful Safari enhancements with Arabic settings
+Maintainer: mody
+Author: mody
+Section: Tweaks
+Depends: mobilesubstrate

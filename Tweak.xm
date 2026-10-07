@@ -2,34 +2,29 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPPrefsDomain = @"com.mody.safariplusultimate";
-static NSString *const kSPPrefsPath = @"/var/mobile/Library/Preferences/com.mody.safariplusultimate.plist";
-static NSString *const kSPGuardVersion = @"1.0.0-1";
+static NSString *const kSPGuardVersion = @"1.0.0-2";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
 static char kSPInstalledKey;
 
+static id SP_GlobalVal(NSString *key) {
+    CFPropertyListRef cf = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    kCFPreferencesAnyApplication);
+    if (!cf) {
+        return nil;
+    }
+    return CFBridgingRelease(cf);
+}
+
 static id SP_RawPref(NSString *key) {
     id v = nil;
     @try {
-        static NSUserDefaults *suite = nil;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            suite = [[NSUserDefaults alloc] initWithSuiteName:kSPPrefsDomain];
-        });
-        v = [suite objectForKey:key];
+        v = SP_GlobalVal(key);
         if (v) {
             return v;
         }
-        CFPropertyListRef cf = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
-                                                        (__bridge CFStringRef)kSPPrefsDomain);
-        if (cf) {
-            v = CFBridgingRelease(cf);
-            return v;
-        }
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kSPPrefsPath];
-        v = d[key];
+        v = [[NSUserDefaults standardUserDefaults] objectForKey:key];
     } @catch (NSException *e) {
     }
     return v;
@@ -46,38 +41,17 @@ static BOOL SP_Pref(NSString *key, BOOL def) {
 static NSString *SP_DebugText(void) {
     NSMutableString *s = [NSMutableString string];
     @try {
-        NSUserDefaults *suite = [[NSUserDefaults alloc] initWithSuiteName:kSPPrefsDomain];
-        id a1 = [suite objectForKey:@"forceCopy"];
-        id a2 = [suite objectForKey:@"masterEnabled"];
-        [s appendFormat:@"A suite: forceCopy=%@ master=%@\n", a1 ? a1 : @"nil", a2 ? a2 : @"nil"];
+        id g1 = SP_GlobalVal(@"SPPlusMaster");
+        id g2 = SP_GlobalVal(@"SPPlusForceCopy");
+        [s appendFormat:@"G global: master=%@ force=%@\n", g1 ? g1 : @"nil", g2 ? g2 : @"nil"];
 
-        CFPropertyListRef b1 = CFPreferencesCopyAppValue(CFSTR("forceCopy"), (__bridge CFStringRef)kSPPrefsDomain);
-        NSString *b1s = b1 ? [NSString stringWithFormat:@"%@", (__bridge id)b1] : @"nil";
-        if (b1) {
-            CFRelease(b1);
-        }
-        [s appendFormat:@"B cfprefs: forceCopy=%@\n", b1s];
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        id h1 = [std objectForKey:@"SPPlusMaster"];
+        id h2 = [std objectForKey:@"SPPlusForceCopy"];
+        [s appendFormat:@"H std: master=%@ force=%@\n", h1 ? h1 : @"nil", h2 ? h2 : @"nil"];
 
-        NSFileManager *fm = [NSFileManager defaultManager];
-        BOOL ex = [fm fileExistsAtPath:kSPPrefsPath];
-        BOOL rd = [fm isReadableFileAtPath:kSPPrefsPath];
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kSPPrefsPath];
-        [s appendFormat:@"C file: exists=%d readable=%d dict=%@\n", (int)ex, (int)rd, d ? d : @"nil"];
-
-        NSError *err = nil;
-        NSArray *items = [fm contentsOfDirectoryAtPath:@"/var/mobile/Library/Preferences" error:&err];
-        NSMutableArray *hits = [NSMutableArray array];
-        for (NSString *n in items) {
-            if ([n rangeOfString:@"mody" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                [hits addObject:n];
-            }
-        }
-        NSString *errs = err ? [NSString stringWithFormat:@"%ld", (long)err.code] : @"none";
-        [s appendFormat:@"D list: %@ err=%@\n", hits, errs];
-
-        [s appendFormat:@"effective: forceCopy=%d master=%d\n",
-         (int)SP_Pref(@"forceCopy", YES), (int)SP_Pref(@"masterEnabled", YES)];
-        [s appendFormat:@"home=%@", NSHomeDirectory()];
+        [s appendFormat:@"effective: master=%d force=%d",
+         (int)SP_Pref(@"SPPlusMaster", YES), (int)SP_Pref(@"SPPlusForceCopy", YES)];
     } @catch (NSException *e) {
         [s appendFormat:@"exception: %@", e];
     }
@@ -239,7 +213,7 @@ static void SP_InstallScripts(WKWebView *wv) {
         }
         objc_setAssociatedObject(ucc, &kSPInstalledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        if (SP_Pref(@"forceCopy", YES)) {
+        if (SP_Pref(@"SPPlusForceCopy", YES)) {
             WKUserScript *script =
                 [[WKUserScript alloc] initWithSource:SP_ForceCopyJS()
                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -281,7 +255,7 @@ static void SP_InstallScripts(WKWebView *wv) {
             return;
         }
         SP_ShowDebugLater();
-        if (!SP_Pref(@"masterEnabled", YES)) {
+        if (!SP_Pref(@"SPPlusMaster", YES)) {
             return;
         }
         %init(SPWebKit);

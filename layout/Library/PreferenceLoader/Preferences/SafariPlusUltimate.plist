@@ -53,6 +53,46 @@
             <key>defaults</key>
             <string>kCFPreferencesAnyApplication</string>
         </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>يعرض نسخة سطح المكتب للمواقع التي تحددها فقط، أما بقية المواقع فتبقى كما هي.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>وضع سطح المكتب عند الحاجة</string>
+            <key>key</key>
+            <string>SPPlusDesktop</string>
+            <key>default</key>
+            <true/>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
+            <string>مواقع سطح المكتب</string>
+            <key>footerText</key>
+            <string>اكتب نطاقات المواقع مفصولة بفواصل، مثل: example.com, site.org. ويشمل ذلك النطاقات الفرعية للموقع.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSEditTextCell</string>
+            <key>label</key>
+            <string>المواقع</string>
+            <key>placeholder</key>
+            <string>example.com, site.org</string>
+            <key>key</key>
+            <string>SPPlusDesktopSites</string>
+            <key>default</key>
+            <string></string>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
     </array>
 </dict>
 </plist>

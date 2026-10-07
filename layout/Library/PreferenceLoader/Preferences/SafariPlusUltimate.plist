@@ -27,11 +27,11 @@
             <key>label</key>
             <string>تفعيل الأداة</string>
             <key>key</key>
-            <string>masterEnabled</string>
+            <string>SPPlusMaster</string>
             <key>default</key>
             <true/>
             <key>defaults</key>
-            <string>com.mody.safariplusultimate</string>
+            <string>kCFPreferencesAnyApplication</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -47,11 +47,11 @@
             <key>label</key>
             <string>تحديد ونسخ النص بالقوة</string>
             <key>key</key>
-            <string>forceCopy</string>
+            <string>SPPlusForceCopy</string>
             <key>default</key>
             <true/>
             <key>defaults</key>
-            <string>com.mody.safariplusultimate</string>
+            <string>kCFPreferencesAnyApplication</string>
         </dict>
     </array>
 </dict>

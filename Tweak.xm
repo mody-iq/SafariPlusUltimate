@@ -10,25 +10,112 @@ static const double kSPSurviveSeconds = 6.0;
 
 static char kSPInstalledKey;
 
-static BOOL SP_Pref(NSString *key, BOOL def) {
+static id SP_RawPref(NSString *key) {
+    id v = nil;
     @try {
         static NSUserDefaults *suite = nil;
         static dispatch_once_t once;
         dispatch_once(&once, ^{
             suite = [[NSUserDefaults alloc] initWithSuiteName:kSPPrefsDomain];
         });
-        id v = [suite objectForKey:key];
-        if ([v respondsToSelector:@selector(boolValue)]) {
-            return [v boolValue];
+        v = [suite objectForKey:key];
+        if (v) {
+            return v;
+        }
+        CFPropertyListRef cf = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                        (__bridge CFStringRef)kSPPrefsDomain);
+        if (cf) {
+            v = CFBridgingRelease(cf);
+            return v;
         }
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kSPPrefsPath];
-        id v2 = d[key];
-        if ([v2 respondsToSelector:@selector(boolValue)]) {
-            return [v2 boolValue];
-        }
+        v = d[key];
     } @catch (NSException *e) {
     }
+    return v;
+}
+
+static BOOL SP_Pref(NSString *key, BOOL def) {
+    id v = SP_RawPref(key);
+    if ([v respondsToSelector:@selector(boolValue)]) {
+        return [v boolValue];
+    }
     return def;
+}
+
+static NSString *SP_DebugText(void) {
+    NSMutableString *s = [NSMutableString string];
+    @try {
+        NSUserDefaults *suite = [[NSUserDefaults alloc] initWithSuiteName:kSPPrefsDomain];
+        id a1 = [suite objectForKey:@"forceCopy"];
+        id a2 = [suite objectForKey:@"masterEnabled"];
+        [s appendFormat:@"A suite: forceCopy=%@ master=%@\n", a1 ? a1 : @"nil", a2 ? a2 : @"nil"];
+
+        CFPropertyListRef b1 = CFPreferencesCopyAppValue(CFSTR("forceCopy"), (__bridge CFStringRef)kSPPrefsDomain);
+        NSString *b1s = b1 ? [NSString stringWithFormat:@"%@", (__bridge id)b1] : @"nil";
+        if (b1) {
+            CFRelease(b1);
+        }
+        [s appendFormat:@"B cfprefs: forceCopy=%@\n", b1s];
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        BOOL ex = [fm fileExistsAtPath:kSPPrefsPath];
+        BOOL rd = [fm isReadableFileAtPath:kSPPrefsPath];
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kSPPrefsPath];
+        [s appendFormat:@"C file: exists=%d readable=%d dict=%@\n", (int)ex, (int)rd, d ? d : @"nil"];
+
+        NSError *err = nil;
+        NSArray *items = [fm contentsOfDirectoryAtPath:@"/var/mobile/Library/Preferences" error:&err];
+        NSMutableArray *hits = [NSMutableArray array];
+        for (NSString *n in items) {
+            if ([n rangeOfString:@"mody" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [hits addObject:n];
+            }
+        }
+        NSString *errs = err ? [NSString stringWithFormat:@"%ld", (long)err.code] : @"none";
+        [s appendFormat:@"D list: %@ err=%@\n", hits, errs];
+
+        [s appendFormat:@"effective: forceCopy=%d master=%d\n",
+         (int)SP_Pref(@"forceCopy", YES), (int)SP_Pref(@"masterEnabled", YES)];
+        [s appendFormat:@"home=%@", NSHomeDirectory()];
+    } @catch (NSException *e) {
+        [s appendFormat:@"exception: %@", e];
+    }
+    return s;
+}
+
+static void SP_ShowDebugLater(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *keyWindow = nil;
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                        if (w.isKeyWindow) {
+                            keyWindow = w;
+                        }
+                    }
+                }
+            }
+            UIViewController *vc = keyWindow.rootViewController;
+            while (vc.presentedViewController) {
+                vc = vc.presentedViewController;
+            }
+            if (!vc) {
+                return;
+            }
+            UIAlertController *alert =
+                [UIAlertController alertControllerWithTitle:@"SafariPlus Debug"
+                                                    message:SP_DebugText()
+                                             preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:nil]];
+            [vc presentViewController:alert animated:YES completion:nil];
+        } @catch (NSException *e) {
+        }
+    });
 }
 
 static BOOL SP_GuardBegin(void) {
@@ -193,6 +280,7 @@ static void SP_InstallScripts(WKWebView *wv) {
         if (!SP_GuardBegin()) {
             return;
         }
+        SP_ShowDebugLater();
         if (!SP_Pref(@"masterEnabled", YES)) {
             return;
         }

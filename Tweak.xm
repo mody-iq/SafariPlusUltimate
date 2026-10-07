@@ -2,7 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-2";
+static NSString *const kSPGuardVersion = @"1.0.0-3";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
@@ -36,60 +36,6 @@ static BOOL SP_Pref(NSString *key, BOOL def) {
         return [v boolValue];
     }
     return def;
-}
-
-static NSString *SP_DebugText(void) {
-    NSMutableString *s = [NSMutableString string];
-    @try {
-        id g1 = SP_GlobalVal(@"SPPlusMaster");
-        id g2 = SP_GlobalVal(@"SPPlusForceCopy");
-        [s appendFormat:@"G global: master=%@ force=%@\n", g1 ? g1 : @"nil", g2 ? g2 : @"nil"];
-
-        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
-        id h1 = [std objectForKey:@"SPPlusMaster"];
-        id h2 = [std objectForKey:@"SPPlusForceCopy"];
-        [s appendFormat:@"H std: master=%@ force=%@\n", h1 ? h1 : @"nil", h2 ? h2 : @"nil"];
-
-        [s appendFormat:@"effective: master=%d force=%d",
-         (int)SP_Pref(@"SPPlusMaster", YES), (int)SP_Pref(@"SPPlusForceCopy", YES)];
-    } @catch (NSException *e) {
-        [s appendFormat:@"exception: %@", e];
-    }
-    return s;
-}
-
-static void SP_ShowDebugLater(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        @try {
-            UIWindow *keyWindow = nil;
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-                        if (w.isKeyWindow) {
-                            keyWindow = w;
-                        }
-                    }
-                }
-            }
-            UIViewController *vc = keyWindow.rootViewController;
-            while (vc.presentedViewController) {
-                vc = vc.presentedViewController;
-            }
-            if (!vc) {
-                return;
-            }
-            UIAlertController *alert =
-                [UIAlertController alertControllerWithTitle:@"SafariPlus Debug"
-                                                    message:SP_DebugText()
-                                             preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:nil]];
-            [vc presentViewController:alert animated:YES completion:nil];
-        } @catch (NSException *e) {
-        }
-    });
 }
 
 static BOOL SP_GuardBegin(void) {
@@ -254,7 +200,6 @@ static void SP_InstallScripts(WKWebView *wv) {
         if (!SP_GuardBegin()) {
             return;
         }
-        SP_ShowDebugLater();
         if (!SP_Pref(@"SPPlusMaster", YES)) {
             return;
         }

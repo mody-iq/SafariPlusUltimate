@@ -71,6 +71,24 @@
             <key>defaults</key>
             <string>kCFPreferencesAnyApplication</string>
         </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>يظهر زر صغير على حافة الصفحة يفتح لوحة سريعة، منها تقلب وضع سطح المكتب بلمسة دون الذهاب للإعدادات.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>الزر العائم داخل الصفحة</string>
+            <key>key</key>
+            <string>SPPlusFloatBtn</string>
+            <key>default</key>
+            <true/>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
     </array>
 </dict>
 </plist>

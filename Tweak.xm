@@ -2,7 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-5";
+static NSString *const kSPGuardVersion = @"1.0.0-6";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
@@ -85,14 +85,25 @@ static BOOL SP_GuardBegin(void) {
 }
 
 static BOOL SP_DesktopEffective(void) {
+    BOOL settingsVal = SP_Pref(@"SPPlusDesktop", NO);
     @try {
-        id ov = [[NSUserDefaults standardUserDefaults] objectForKey:@"SPDesktopOverride"];
-        if ([ov respondsToSelector:@selector(boolValue)]) {
-            return [ov boolValue];
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        id ov = [std objectForKey:@"SPDesktopOverride"];
+        if ([ov isKindOfClass:[NSDictionary class]]) {
+            id val = ov[@"val"];
+            id base = ov[@"base"];
+            if ([val respondsToSelector:@selector(boolValue)] &&
+                [base respondsToSelector:@selector(boolValue)] &&
+                ([base boolValue] == settingsVal)) {
+                return [val boolValue];
+            }
+            [std removeObjectForKey:@"SPDesktopOverride"];
+        } else if (ov) {
+            [std removeObjectForKey:@"SPDesktopOverride"];
         }
     } @catch (NSException *e) {
     }
-    return SP_Pref(@"SPPlusDesktop", NO);
+    return settingsVal;
 }
 
 static void SP_PatchDelegateClass(Class cls) {
@@ -156,6 +167,60 @@ static void SP_PatchDelegateClass(Class cls) {
         });
     class_replaceMethod(cls, sel, newImp, types);
 }
+
+@interface SPBridge : NSObject <WKScriptMessageHandlerWithReply>
+@end
+
+@implementation SPBridge
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message
+                 replyHandler:(void (^)(id _Nullable reply, NSString *_Nullable errorMessage))replyHandler {
+    BOOL replied = NO;
+    @try {
+        if (!message.frameInfo.isMainFrame) {
+            replied = YES;
+            replyHandler(nil, @"main frame only");
+            return;
+        }
+        NSDictionary *body = [message.body isKindOfClass:[NSDictionary class]] ? message.body : nil;
+        id cmdObj = body[@"cmd"];
+        NSString *cmd = [cmdObj isKindOfClass:[NSString class]] ? cmdObj : @"";
+
+        if ([cmd isEqualToString:@"getState"]) {
+            replied = YES;
+            replyHandler(@{@"desktop": @(SP_DesktopEffective())}, nil);
+            return;
+        }
+
+        if ([cmd isEqualToString:@"toggleDesktop"]) {
+            BOOL now = !SP_DesktopEffective();
+            BOOL base = SP_Pref(@"SPPlusDesktop", NO);
+            NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+            [std setObject:@{@"val": @(now), @"base": @(base)} forKey:@"SPDesktopOverride"];
+            [std synchronize];
+
+            replied = YES;
+            replyHandler(@{@"desktop": @(now)}, nil);
+
+            __weak WKWebView *wv = message.webView;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [wv reload];
+            });
+            return;
+        }
+
+        replied = YES;
+        replyHandler(nil, @"unknown command");
+    } @catch (NSException *e) {
+        if (!replied) {
+            replyHandler(nil, @"error");
+        }
+    }
+}
+
+@end
 
 static NSString *SP_ForceCopyJS(void) {
     static const char *js = R"SPJS(
@@ -223,6 +288,144 @@ static NSString *SP_ForceCopyJS(void) {
     return [NSString stringWithUTF8String:js];
 }
 
+static NSString *SP_FloatJS(void) {
+    static const char *js = R"SPUI(
+(function () {
+  try {
+    if (window.top !== window) { return; }
+    if (window.__spPlusUI) { return; }
+    window.__spPlusUI = true;
+
+    var handlers = window.webkit && window.webkit.messageHandlers;
+    var bridge = handlers && handlers.spBridge;
+    if (!bridge) { return; }
+    if (!document.documentElement) { return; }
+
+    function el(tag, id, text) {
+      var e = document.createElement(tag);
+      if (id) { e.id = id; }
+      if (text !== undefined) { e.textContent = text; }
+      return e;
+    }
+
+    var host = document.createElement('div');
+    host.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;';
+    var root = host.attachShadow({ mode: 'closed' });
+
+    var style = document.createElement('style');
+    style.textContent = [
+      '#box{position:fixed;left:0;top:0;width:40px;height:40px;transform-origin:0 0;direction:rtl;font-family:-apple-system,Helvetica,Arial,sans-serif;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}',
+      '#fab{width:40px;height:40px;border-radius:20px;background:rgba(28,28,30,0.55);border:1px solid rgba(255,255,255,0.28);color:#fff;font-size:20px;line-height:40px;text-align:center;cursor:pointer;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);}',
+      '#panel{position:absolute;right:0;bottom:48px;width:210px;padding:10px;border-radius:16px;background:rgba(28,28,30,0.96);color:#fff;display:none;box-shadow:0 6px 24px rgba(0,0,0,0.35);}',
+      '#title{font-size:13px;opacity:0.7;margin-bottom:8px;text-align:right;}',
+      '#desk{display:flex;align-items:center;justify-content:space-between;width:100%;box-sizing:border-box;padding:10px 12px;border:0;border-radius:12px;background:rgba(255,255,255,0.12);color:#fff;font-size:15px;font-family:inherit;cursor:pointer;}',
+      '#st{font-weight:600;color:#aaa;}',
+      '#desk.on #st{color:#30d158;}'
+    ].join('');
+
+    var box = el('div', 'box');
+    var panel = el('div', 'panel');
+    panel.appendChild(el('div', 'title', '\u0633\u0641\u0627\u0631\u064A \u0628\u0644\u0633 \u0623\u0644\u062A\u064A\u0645\u064A\u062A'));
+    var desk = el('button', 'desk');
+    var lbl = el('span', 'lbl', '\u0648\u0636\u0639 \u0633\u0637\u062D \u0627\u0644\u0645\u0643\u062A\u0628');
+    var st = el('span', 'st', '...');
+    desk.appendChild(lbl);
+    desk.appendChild(st);
+    panel.appendChild(desk);
+    var fab = el('div', 'fab', '\u2699\uFE0E');
+    box.appendChild(panel);
+    box.appendChild(fab);
+    root.appendChild(style);
+    root.appendChild(box);
+
+    var busy = false;
+
+    function setState(on) {
+      desk.className = on ? 'on' : '';
+      st.textContent = on ? '\u0645\u0641\u0639\u0651\u0644' : '\u0645\u062A\u0648\u0642\u0641';
+    }
+
+    function refresh() {
+      try {
+        bridge.postMessage({ cmd: 'getState' }).then(function (r) {
+          if (r && typeof r.desktop === 'boolean') { setState(r.desktop); }
+        }, function () {});
+      } catch (e) {}
+    }
+
+    desk.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (busy) { return; }
+      busy = true;
+      st.textContent = '...';
+      try {
+        bridge.postMessage({ cmd: 'toggleDesktop' }).then(function (r) {
+          if (r && typeof r.desktop === 'boolean') { setState(r.desktop); }
+        }, function () { busy = false; refresh(); });
+      } catch (e) { busy = false; }
+    }, false);
+
+    fab.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var open = (panel.style.display === 'block');
+      panel.style.display = open ? 'none' : 'block';
+      if (!open) { refresh(); }
+    }, false);
+
+    document.addEventListener('click', function (ev) {
+      try {
+        var path = ev.composedPath ? ev.composedPath() : [];
+        if (path.indexOf(host) === -1) { panel.style.display = 'none'; }
+      } catch (e) {}
+    }, true);
+
+    function place() {
+      var vv = window.visualViewport;
+      var s = 1;
+      var x;
+      var y;
+      if (vv) {
+        s = 1 / (vv.scale || 1);
+        x = vv.offsetLeft + vv.width - 46 * s;
+        y = vv.offsetTop + vv.height * 0.62;
+      } else {
+        x = window.innerWidth - 46;
+        y = window.innerHeight * 0.62;
+      }
+      box.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + s + ')';
+    }
+
+    var pending = false;
+    function schedule() {
+      if (pending) { return; }
+      pending = true;
+      requestAnimationFrame(function () { pending = false; place(); });
+    }
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', schedule);
+      window.visualViewport.addEventListener('scroll', schedule);
+    }
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    window.addEventListener('orientationchange', schedule);
+    window.addEventListener('load', function () {
+      if (!host.isConnected && document.documentElement) { document.documentElement.appendChild(host); }
+      place();
+    });
+
+    document.documentElement.appendChild(host);
+    place();
+    setTimeout(place, 400);
+    refresh();
+  } catch (e) {}
+})();
+)SPUI";
+    return [NSString stringWithUTF8String:js];
+}
+
 static void SP_InstallScripts(WKWebView *wv) {
     @try {
         WKUserContentController *ucc = wv.configuration.userContentController;
@@ -240,6 +443,18 @@ static void SP_InstallScripts(WKWebView *wv) {
                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                     forMainFrameOnly:NO];
             [ucc addUserScript:script];
+        }
+
+        if (SP_Pref(@"SPPlusFloatBtn", YES)) {
+            WKContentWorld *world = [WKContentWorld worldWithName:@"SPPlus"];
+            SPBridge *bridge = [[SPBridge alloc] init];
+            [ucc addScriptMessageHandlerWithReply:bridge contentWorld:world name:@"spBridge"];
+            WKUserScript *ui =
+                [[WKUserScript alloc] initWithSource:SP_FloatJS()
+                                       injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+                                    forMainFrameOnly:YES
+                                      inContentWorld:world];
+            [ucc addUserScript:ui];
         }
     } @catch (NSException *e) {
     }

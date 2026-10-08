@@ -2,7 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-4";
+static NSString *const kSPGuardVersion = @"1.0.0-5";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
@@ -84,61 +84,15 @@ static BOOL SP_GuardBegin(void) {
     }
 }
 
-static NSString *SP_NormalizeHost(NSString *s) {
-    if (![s isKindOfClass:[NSString class]]) {
-        return @"";
-    }
-    NSString *t = [[s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
-                   lowercaseString];
-    if (t.length == 0) {
-        return @"";
-    }
-    NSRange r = [t rangeOfString:@"://"];
-    if (r.location != NSNotFound) {
-        t = [t substringFromIndex:NSMaxRange(r)];
-    }
-    NSRange sl = [t rangeOfString:@"/"];
-    if (sl.location != NSNotFound) {
-        t = [t substringToIndex:sl.location];
-    }
-    NSRange co = [t rangeOfString:@":"];
-    if (co.location != NSNotFound) {
-        t = [t substringToIndex:co.location];
-    }
-    if ([t hasPrefix:@"www."]) {
-        t = [t substringFromIndex:4];
-    }
-    return t;
-}
-
-static NSArray *SP_DesktopHosts(void) {
-    id v = SP_RawPref(@"SPPlusDesktopSites");
-    if (![v isKindOfClass:[NSString class]]) {
-        return @[];
-    }
-    NSCharacterSet *seps = [NSCharacterSet characterSetWithCharactersInString:@",;\u060C\n\r\t "];
-    NSArray *parts = [(NSString *)v componentsSeparatedByCharactersInSet:seps];
-    NSMutableArray *out = [NSMutableArray array];
-    for (NSString *p in parts) {
-        NSString *h = SP_NormalizeHost(p);
-        if (h.length > 0) {
-            [out addObject:h];
+static BOOL SP_DesktopEffective(void) {
+    @try {
+        id ov = [[NSUserDefaults standardUserDefaults] objectForKey:@"SPDesktopOverride"];
+        if ([ov respondsToSelector:@selector(boolValue)]) {
+            return [ov boolValue];
         }
+    } @catch (NSException *e) {
     }
-    return out;
-}
-
-static BOOL SP_HostWantsDesktop(NSString *host) {
-    NSString *h = SP_NormalizeHost(host);
-    if (h.length == 0) {
-        return NO;
-    }
-    for (NSString *e in SP_DesktopHosts()) {
-        if ([h isEqualToString:e] || [h hasSuffix:[@"." stringByAppendingString:e]]) {
-            return YES;
-        }
-    }
-    return NO;
+    return SP_Pref(@"SPPlusDesktop", NO);
 }
 
 static void SP_PatchDelegateClass(Class cls) {
@@ -175,8 +129,9 @@ static void SP_PatchDelegateClass(Class cls) {
             BOOL should = NO;
             @try {
                 BOOL isMain = (!action.targetFrame || action.targetFrame.isMainFrame);
-                NSString *host = action.request.URL.host;
-                should = (isMain && host.length > 0 && SP_HostWantsDesktop(host));
+                NSString *scheme = [action.request.URL.scheme lowercaseString];
+                BOOL web = ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]);
+                should = (isMain && web && SP_DesktopEffective());
             } @catch (NSException *e) {
                 should = NO;
             }
@@ -302,14 +257,6 @@ static void SP_InstallScripts(WKWebView *wv) {
     return r;
 }
 
-%end
-
-%end
-
-%group SPDesktop
-
-%hook WKWebView
-
 - (void)setNavigationDelegate:(id<WKNavigationDelegate>)delegate {
     %orig;
     if (delegate) {
@@ -339,8 +286,5 @@ static void SP_InstallScripts(WKWebView *wv) {
             return;
         }
         %init(SPWebKit);
-        if (SP_Pref(@"SPPlusDesktop", YES)) {
-            %init(SPDesktop);
-        }
     }
 }

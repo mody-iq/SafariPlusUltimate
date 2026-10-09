@@ -37,6 +37,62 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>label</key>
+            <string>الحجب</string>
+            <key>footerText</key>
+            <string>يحجب شبكات الإعلانات بقواعد مدمجة وقوائم ضخمة تُحدَّث تلقائياً كل 3 أيام. أول تحديث قد يحتاج بعض الوقت وإنترنتاً.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>حجب الإعلانات</string>
+            <key>key</key>
+            <string>SPPlusAdblock</string>
+            <key>default</key>
+            <true/>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>يمنع أدوات تتبع نشاطك بين المواقع.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>حجب التتبع</string>
+            <key>key</key>
+            <string>SPPlusTrackers</string>
+            <key>default</key>
+            <true/>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>footerText</key>
+            <string>يخفي نوافذ طلب الموافقة على الكوكيز المزعجة.</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSSwitchCell</string>
+            <key>label</key>
+            <string>إخفاء لافتات الكوكيز</string>
+            <key>key</key>
+            <string>SPPlusCookies</string>
+            <key>default</key>
+            <true/>
+            <key>defaults</key>
+            <string>kCFPreferencesAnyApplication</string>
+        </dict>
+        <dict>
+            <key>cell</key>
+            <string>PSGroupCell</string>
+            <key>label</key>
             <string>الميزات</string>
             <key>footerText</key>
             <string>يكسر منع تحديد النص ونسخه وقائمة الضغط المطول في المواقع التي تحظرها.</string>
@@ -75,7 +131,7 @@
             <key>cell</key>
             <string>PSGroupCell</string>
             <key>footerText</key>
-            <string>يظهر زر صغير على حافة الصفحة يفتح لوحة سريعة، منها تقلب وضع سطح المكتب بلمسة دون الذهاب للإعدادات.</string>
+            <string>زر صغير يمكن سحبه على حافة الصفحة يفتح لوحة سريعة لقلب وضع سطح المكتب.</string>
         </dict>
         <dict>
             <key>cell</key>
@@ -85,7 +141,7 @@
             <key>key</key>
             <string>SPPlusFloatBtn</string>
             <key>default</key>
-            <true/>
+            <false/>
             <key>defaults</key>
             <string>kCFPreferencesAnyApplication</string>
         </dict>

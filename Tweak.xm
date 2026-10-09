@@ -2,11 +2,19 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-7";
+static NSString *const kSPGuardVersion = @"1.0.0-8";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
+static NSString *const kSPAdsURL = @"https://lists.angelakismax.com/ads.json";
+static NSString *const kSPPrivacyURL = @"https://lists.angelakismax.com/privacy.json";
+static NSString *const kSPCookiesURL = @"https://lists.angelakismax.com/cookies.json";
+static const double kSPListMaxAge = 72.0 * 3600.0;
+static const double kSPListRetryAfterFail = 6.0 * 3600.0;
+static const double kSPDownloadDelay = 8.0;
+
 static char kSPInstalledKey;
+static char kSPAttachedKey;
 
 typedef void (^SPDecisionHandler)(WKNavigationActionPolicy, WKWebpagePreferences *);
 
@@ -50,6 +58,9 @@ static BOOL SP_GuardBegin(void) {
             [std setInteger:0 forKey:@"SPCrashCount"];
             [std setBool:NO forKey:@"SPTripped"];
             [std setBool:NO forKey:@"SPPending"];
+            [std setInteger:0 forKey:@"SPAdCrash"];
+            [std setBool:NO forKey:@"SPAdTripped"];
+            [std setBool:NO forKey:@"SPAdPending"];
         }
 
         if ([std boolForKey:@"SPTripped"]) {
@@ -167,6 +178,335 @@ static void SP_PatchDelegateClass(Class cls) {
         });
     class_replaceMethod(cls, sel, newImp, types);
 }
+
+#pragma mark - Ad blocking engine
+
+static NSHashTable *SP_TrackedUccs(void) {
+    static NSHashTable *t = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        t = [NSHashTable weakObjectsHashTable];
+    });
+    return t;
+}
+
+static NSMutableDictionary *SP_ActiveLists(void) {
+    static NSMutableDictionary *d = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        d = [NSMutableDictionary dictionary];
+    });
+    return d;
+}
+
+static void SP_AttachOne(WKUserContentController *ucc, NSString *ident, WKContentRuleList *list) {
+    if (!ucc || !list || !ident) {
+        return;
+    }
+    @try {
+        NSMutableDictionary *att = objc_getAssociatedObject(ucc, &kSPAttachedKey);
+        if (!att) {
+            att = [NSMutableDictionary dictionary];
+            objc_setAssociatedObject(ucc, &kSPAttachedKey, att, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        WKContentRuleList *old = att[ident];
+        if (old == list) {
+            return;
+        }
+        if (old) {
+            [ucc removeContentRuleList:old];
+        }
+        [ucc addContentRuleList:list];
+        att[ident] = list;
+    } @catch (NSException *e) {
+    }
+}
+
+static void SP_AttachAll(WKUserContentController *ucc) {
+    NSDictionary *snap = [SP_ActiveLists() copy];
+    for (NSString *k in snap) {
+        SP_AttachOne(ucc, k, snap[k]);
+    }
+}
+
+static void SP_ListReady(NSString *ident, WKContentRuleList *list) {
+    if (!ident || !list) {
+        return;
+    }
+    SP_ActiveLists()[ident] = list;
+    for (WKUserContentController *u in [SP_TrackedUccs() allObjects]) {
+        SP_AttachOne(u, ident, list);
+    }
+}
+
+static BOOL SP_AdRemoteAllowed(void) {
+    @try {
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        if ([std boolForKey:@"SPAdTripped"]) {
+            return NO;
+        }
+        if ([std boolForKey:@"SPAdPending"]) {
+            NSInteger n = [std integerForKey:@"SPAdCrash"] + 1;
+            [std setInteger:n forKey:@"SPAdCrash"];
+            [std setBool:NO forKey:@"SPAdPending"];
+            if (n >= 2) {
+                [std setBool:YES forKey:@"SPAdTripped"];
+                [std synchronize];
+                return NO;
+            }
+            [std synchronize];
+        }
+        return YES;
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
+
+static void SP_AdPendingBegin(void) {
+    @try {
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        [std setBool:YES forKey:@"SPAdPending"];
+        [std synchronize];
+    } @catch (NSException *e) {
+    }
+}
+
+static void SP_AdPendingEnd(void) {
+    @try {
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        [std setBool:NO forKey:@"SPAdPending"];
+        [std setInteger:0 forKey:@"SPAdCrash"];
+        [std synchronize];
+    } @catch (NSException *e) {
+    }
+}
+
+static NSArray *SP_CoreAdDomains(void) {
+    return @[@"doubleclick.net", @"googlesyndication.com", @"googleadservices.com",
+             @"adservice.google.com", @"adnxs.com", @"adsrvr.org", @"advertising.com",
+             @"taboola.com", @"outbrain.com", @"criteo.com", @"criteo.net", @"pubmatic.com",
+             @"rubiconproject.com", @"openx.net", @"casalemedia.com", @"smartadserver.com",
+             @"amazon-adsystem.com", @"moatads.com", @"adform.net", @"2mdn.net",
+             @"serving-sys.com", @"mgid.com", @"revcontent.com", @"popads.net", @"popcash.net",
+             @"propellerads.com", @"exoclick.com", @"juicyads.com", @"trafficjunky.net",
+             @"adsterra.com", @"onclickads.net", @"clickadu.com", @"hilltopads.net", @"zedo.com",
+             @"yieldmo.com", @"teads.tv", @"sharethrough.com", @"media.net", @"bidswitch.net",
+             @"33across.com", @"lijit.com", @"sovrn.com", @"contextweb.com", @"adcolony.com",
+             @"applovin.com", @"inmobi.com", @"mopub.com", @"vungle.com", @"chartboost.com",
+             @"ironsrc.com", @"supersonicads.com"];
+}
+
+static NSArray *SP_CoreAdSelectors(void) {
+    return @[@"ins.adsbygoogle", @".adsbygoogle", @"[id^=\"google_ads_iframe\"]",
+             @"[id^=\"div-gpt-ad\"]", @"[data-ad-slot]", @"[data-google-query-id]",
+             @".google-auto-placed", @"iframe[src*=\"doubleclick.net\"]",
+             @"iframe[src*=\"googlesyndication.com\"]", @"[id^=\"taboola-\"]", @".OUTBRAIN",
+             @".trc_rbox_container"];
+}
+
+static NSArray *SP_CoreTrackerDomains(void) {
+    return @[@"google-analytics.com", @"analytics.google.com", @"scorecardresearch.com",
+             @"quantserve.com", @"hotjar.com", @"hotjar.io", @"mixpanel.com", @"segment.io",
+             @"amplitude.com", @"fullstory.com", @"mouseflow.com", @"crazyegg.com",
+             @"chartbeat.com", @"chartbeat.net", @"clarity.ms", @"bat.bing.com",
+             @"px.ads.linkedin.com", @"snap.licdn.com", @"analytics.tiktok.com",
+             @"ads-twitter.com", @"analytics.twitter.com", @"omtrdc.net", @"demdex.net",
+             @"krxd.net", @"bluekai.com", @"nr-data.net"];
+}
+
+static NSString *SP_BuildCoreJSON(NSArray *domains, NSArray *selectors) {
+    NSMutableArray *rules = [NSMutableArray array];
+    for (NSString *d in domains) {
+        NSString *esc = [d stringByReplacingOccurrencesOfString:@"." withString:@"\\."];
+        NSString *flt = [NSString stringWithFormat:@"^[^:]+:(//)?([^/]+\\.)?%@[:/]", esc];
+        [rules addObject:@{@"trigger": @{@"url-filter": flt, @"load-type": @[@"third-party"]},
+                           @"action": @{@"type": @"block"}}];
+    }
+    if (selectors.count > 0) {
+        [rules addObject:@{@"trigger": @{@"url-filter": @".*"},
+                           @"action": @{@"type": @"css-display-none",
+                                        @"selector": [selectors componentsJoinedByString:@", "]}}];
+    }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:rules options:0 error:nil];
+    if (!data) {
+        return nil;
+    }
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static void SP_LoadCore(NSString *ident, NSArray *domains, NSArray *selectors) {
+    WKContentRuleListStore *store = [WKContentRuleListStore defaultStore];
+    [store lookUpContentRuleListForIdentifier:ident
+                            completionHandler:^(WKContentRuleList *list, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (list) {
+                SP_ListReady(ident, list);
+                return;
+            }
+            NSString *json = SP_BuildCoreJSON(domains, selectors);
+            if (!json) {
+                return;
+            }
+            [store compileContentRuleListForIdentifier:ident
+                                encodedContentRuleList:json
+                                     completionHandler:^(WKContentRuleList *l, NSError *e) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (l) {
+                        SP_ListReady(ident, l);
+                    }
+                });
+            }];
+        });
+    }];
+}
+
+static void SP_Download(NSString *ident, NSString *urlStr, void (^done)(void)) {
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) {
+        if (done) {
+            done();
+        }
+        return;
+    }
+    NSMutableURLRequest *req =
+        [NSMutableURLRequest requestWithURL:url
+                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                            timeoutInterval:90.0];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger code = [response isKindOfClass:[NSHTTPURLResponse class]]
+                             ? ((NSHTTPURLResponse *)response).statusCode : 0;
+        NSString *json = nil;
+        if (!error && code == 200 && data.length > 2000 && data.length < 60u * 1024u * 1024u) {
+            json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+            NSString *failKey = [@"SPListFail_" stringByAppendingString:ident];
+            NSString *timeKey = [@"SPListTime_" stringByAppendingString:ident];
+            double now = [[NSDate date] timeIntervalSince1970];
+
+            BOOL valid = NO;
+            if (json.length > 2000) {
+                NSMutableCharacterSet *skip =
+                    [NSMutableCharacterSet whitespaceAndNewlineCharacterSet];
+                [skip addCharactersInString:@"\uFEFF"];
+                NSString *head = [[json substringToIndex:MIN((NSUInteger)16, json.length)]
+                                  stringByTrimmingCharactersInSet:skip];
+                valid = [head hasPrefix:@"["];
+            }
+            if (!valid) {
+                [std setDouble:now forKey:failKey];
+                [std synchronize];
+                if (done) {
+                    done();
+                }
+                return;
+            }
+
+            [[WKContentRuleListStore defaultStore]
+                compileContentRuleListForIdentifier:ident
+                             encodedContentRuleList:json
+                                  completionHandler:^(WKContentRuleList *list, NSError *err) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSUserDefaults *s = [NSUserDefaults standardUserDefaults];
+                    double t = [[NSDate date] timeIntervalSince1970];
+                    if (list) {
+                        SP_ListReady(ident, list);
+                        [s setDouble:t forKey:timeKey];
+                        [s removeObjectForKey:failKey];
+                    } else {
+                        [s setDouble:t forKey:failKey];
+                    }
+                    [s synchronize];
+                    if (done) {
+                        done();
+                    }
+                });
+            }];
+        });
+    }];
+    [task resume];
+}
+
+static NSMutableArray *gSPJobs = nil;
+static BOOL gSPJobRunning = NO;
+
+static void SP_RunNextJob(void) {
+    if (gSPJobs.count == 0) {
+        gSPJobRunning = NO;
+        SP_AdPendingEnd();
+        return;
+    }
+    gSPJobRunning = YES;
+    SP_AdPendingBegin();
+    NSArray *job = gSPJobs.firstObject;
+    [gSPJobs removeObjectAtIndex:0];
+    SP_Download(job[0], job[1], ^{
+        SP_RunNextJob();
+    });
+}
+
+static void SP_EnqueueDownload(NSString *ident, NSString *url) {
+    if (!gSPJobs) {
+        gSPJobs = [NSMutableArray array];
+    }
+    [gSPJobs addObject:@[ident, url]];
+    if (!gSPJobRunning) {
+        SP_RunNextJob();
+    }
+}
+
+static void SP_LoadRemote(NSString *ident, NSString *urlStr, BOOL allowDownload) {
+    WKContentRuleListStore *store = [WKContentRuleListStore defaultStore];
+    [store lookUpContentRuleListForIdentifier:ident
+                            completionHandler:^(WKContentRuleList *list, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (list) {
+                SP_ListReady(ident, list);
+            }
+            if (!allowDownload) {
+                return;
+            }
+            NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+            double now = [[NSDate date] timeIntervalSince1970];
+            double last = [std doubleForKey:[@"SPListTime_" stringByAppendingString:ident]];
+            double fail = [std doubleForKey:[@"SPListFail_" stringByAppendingString:ident]];
+            BOOL stale = (!list) || ((now - last) > kSPListMaxAge);
+            BOOL cooling = (fail > 0.0 && (now - fail) < kSPListRetryAfterFail);
+            if (stale && !cooling) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSPDownloadDelay * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    SP_EnqueueDownload(ident, urlStr);
+                });
+            }
+        });
+    }];
+}
+
+static void SP_AdblockStart(void) {
+    BOOL ads = SP_Pref(@"SPPlusAdblock", YES);
+    BOOL trk = SP_Pref(@"SPPlusTrackers", YES);
+    BOOL cky = SP_Pref(@"SPPlusCookies", YES);
+    if (!ads && !trk && !cky) {
+        return;
+    }
+    BOOL remoteOK = SP_AdRemoteAllowed();
+
+    if (ads) {
+        SP_LoadCore(@"SPCoreAds1", SP_CoreAdDomains(), SP_CoreAdSelectors());
+        SP_LoadRemote(@"SPAds", kSPAdsURL, remoteOK);
+    }
+    if (trk) {
+        SP_LoadCore(@"SPCoreTrk1", SP_CoreTrackerDomains(), @[]);
+        SP_LoadRemote(@"SPPrivacy", kSPPrivacyURL, remoteOK);
+    }
+    if (cky) {
+        SP_LoadRemote(@"SPCookies", kSPCookiesURL, remoteOK);
+    }
+}
+
+#pragma mark - Bridge and scripts
 
 static double SP_Clamp01(double v) {
     if (v < 0.0) {
@@ -570,6 +910,9 @@ static void SP_InstallScripts(WKWebView *wv) {
         }
         objc_setAssociatedObject(ucc, &kSPInstalledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+        [SP_TrackedUccs() addObject:ucc];
+        SP_AttachAll(ucc);
+
         if (SP_Pref(@"SPPlusForceCopy", YES)) {
             WKUserScript *script =
                 [[WKUserScript alloc] initWithSource:SP_ForceCopyJS()
@@ -578,7 +921,7 @@ static void SP_InstallScripts(WKWebView *wv) {
             [ucc addUserScript:script];
         }
 
-        if (SP_Pref(@"SPPlusFloatBtn", YES)) {
+        if (SP_Pref(@"SPPlusFloatBtn", NO)) {
             WKContentWorld *world = [WKContentWorld worldWithName:@"SPPlus"];
             SPBridge *bridge = [[SPBridge alloc] init];
             [ucc addScriptMessageHandlerWithReply:bridge contentWorld:world name:@"spBridge"];
@@ -634,5 +977,8 @@ static void SP_InstallScripts(WKWebView *wv) {
             return;
         }
         %init(SPWebKit);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SP_AdblockStart();
+        });
     }
 }

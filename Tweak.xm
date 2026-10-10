@@ -2,7 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-static NSString *const kSPGuardVersion = @"1.0.0-8";
+static NSString *const kSPGuardVersion = @"1.0.0-9";
 static const NSInteger kSPCrashLimit = 3;
 static const double kSPSurviveSeconds = 6.0;
 
@@ -177,6 +177,238 @@ static void SP_PatchDelegateClass(Class cls) {
                        SPDecisionHandler))orig)(self_, sel, wv, action, prefs, wrapped);
         });
     class_replaceMethod(cls, sel, newImp, types);
+}
+
+#pragma mark - Popup guard
+
+static NSArray *SP_PopupAllowHosts(void) {
+    return @[@"accounts.google.com", @"appleid.apple.com", @"login.microsoftonline.com",
+             @"login.live.com", @"facebook.com", @"github.com", @"paypal.com", @"stripe.com",
+             @"twitter.com", @"x.com", @"discord.com", @"linkedin.com", @"auth0.com",
+             @"okta.com"];
+}
+
+static BOOL SP_HostInList(NSString *host, NSArray *list) {
+    if (host.length == 0) {
+        return NO;
+    }
+    for (NSString *e in list) {
+        if ([host isEqualToString:e] || [host hasSuffix:[@"." stringByAppendingString:e]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSString *SP_BaseDomain(NSString *host) {
+    NSArray *p = [host componentsSeparatedByString:@"."];
+    if (p.count <= 2) {
+        return host;
+    }
+    NSString *last = p[p.count - 1];
+    NSString *sec = p[p.count - 2];
+    NSSet *slds = [NSSet setWithObjects:@"co", @"com", @"org", @"net", @"gov", @"edu", @"ac", nil];
+    if (last.length == 2 && [slds containsObject:sec]) {
+        return [[p subarrayWithRange:NSMakeRange(p.count - 3, 3)] componentsJoinedByString:@"."];
+    }
+    return [[p subarrayWithRange:NSMakeRange(p.count - 2, 2)] componentsJoinedByString:@"."];
+}
+
+static BOOL SP_ShouldBlockPopup(WKWebView *opener, WKNavigationAction *action) {
+    @try {
+        if (!SP_Pref(@"SPPlusPopupGuard", YES)) {
+            return NO;
+        }
+        NSString *host = [action.request.URL.host lowercaseString];
+        if (host.length > 0 && SP_HostInList(host, SP_PopupAllowHosts())) {
+            return NO;
+        }
+        WKNavigationType type = action.navigationType;
+        if (type == WKNavigationTypeLinkActivated) {
+            if (!SP_Pref(@"SPPlusPopupStrict", NO)) {
+                return NO;
+            }
+            NSString *pageHost = [opener.URL.host lowercaseString];
+            if (host.length == 0 || pageHost.length == 0) {
+                return NO;
+            }
+            return ![SP_BaseDomain(host) isEqualToString:SP_BaseDomain(pageHost)];
+        }
+        if (type == WKNavigationTypeOther) {
+            return YES;
+        }
+    } @catch (NSException *e) {
+    }
+    return NO;
+}
+
+static void SP_PatchUIDelegateClass(Class cls) {
+    if (!cls) {
+        return;
+    }
+    static NSMutableSet *done = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        done = [NSMutableSet set];
+    });
+    NSString *name = NSStringFromClass(cls);
+    @synchronized (done) {
+        if ([done containsObject:name]) {
+            return;
+        }
+        [done addObject:name];
+    }
+
+    SEL sel = @selector(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        return;
+    }
+    IMP orig = method_getImplementation(m);
+    const char *types = method_getTypeEncoding(m);
+    if (!orig || !types) {
+        return;
+    }
+
+    IMP newImp = imp_implementationWithBlock(
+        ^id(id self_, WKWebView *wv, WKWebViewConfiguration *cfg, WKNavigationAction *action,
+            WKWindowFeatures *feat) {
+            if (SP_ShouldBlockPopup(wv, action)) {
+                return nil;
+            }
+            return ((id (*)(id, SEL, WKWebView *, WKWebViewConfiguration *, WKNavigationAction *,
+                            WKWindowFeatures *))orig)(self_, sel, wv, cfg, action, feat);
+        });
+    class_replaceMethod(cls, sel, newImp, types);
+}
+
+static NSString *SP_PopupGuardJS(void) {
+    static const char *js = R"SPPG(
+(function () {
+  try {
+    if (window.__spPopupGuard) { return; }
+    window.__spPopupGuard = true;
+
+    var ALLOW = __SP_ALLOW__;
+
+    function hostOf(u) {
+      try { return new URL(u, location.href).hostname.toLowerCase(); } catch (e) { return ''; }
+    }
+    function inAllow(h) {
+      for (var i = 0; i < ALLOW.length; i++) {
+        var a = ALLOW[i];
+        if (h === a || h.slice(-(a.length + 1)) === '.' + a) { return true; }
+      }
+      return false;
+    }
+    var SLD = { co: 1, com: 1, org: 1, net: 1, gov: 1, edu: 1, ac: 1 };
+    function base(h) {
+      var p = h.split('.');
+      if (p.length <= 2) { return h; }
+      var last = p[p.length - 1];
+      var sec = p[p.length - 2];
+      if (last.length === 2 && SLD[sec]) { return p.slice(-3).join('.'); }
+      return p.slice(-2).join('.');
+    }
+
+    var inCrossFrame = false;
+    try { void window.top.location.href; } catch (e) { inCrossFrame = true; }
+    var myBase = base((location.hostname || '').toLowerCase());
+
+    function allowedOpen(url) {
+      var h = hostOf(url || '');
+      if (!h) { return false; }
+      if (inAllow(h)) { return true; }
+      if (inCrossFrame) { return false; }
+      return base(h) === myBase;
+    }
+
+    function blockAnchor(a) {
+      try {
+        var href = a.href;
+        if (!href || href.indexOf('http') !== 0) { return false; }
+        var t = (a.target || '').toLowerCase();
+        if (!t || t === '_self' || t === '_top' || t === '_parent') { return false; }
+        if (a.hasAttribute('download')) { return false; }
+        var h = hostOf(href);
+        if (!h || inAllow(h)) { return false; }
+        if (inCrossFrame) { return true; }
+        return base(h) !== myBase;
+      } catch (e) { return false; }
+    }
+
+    function decoy() {
+      var loc = {};
+      try {
+        Object.defineProperty(loc, 'href', { get: function () { return 'about:blank'; }, set: function () {} });
+      } catch (e) {}
+      loc.assign = function () {};
+      loc.replace = function () {};
+      return {
+        closed: false,
+        opener: null,
+        name: '',
+        location: loc,
+        focus: function () {},
+        blur: function () {},
+        close: function () { this.closed = true; },
+        postMessage: function () {},
+        document: {
+          write: function () {},
+          writeln: function () {},
+          open: function () {},
+          close: function () {},
+          body: {},
+          documentElement: {}
+        }
+      };
+    }
+
+    var nativeOpen = window.open;
+    window.open = function (url, target, features) {
+      try {
+        if (!allowedOpen(url)) { return decoy(); }
+      } catch (e) {}
+      return nativeOpen.apply(window, arguments);
+    };
+
+    var nativeClick = HTMLElement.prototype.click;
+    HTMLElement.prototype.click = function () {
+      try {
+        if (this instanceof HTMLAnchorElement && blockAnchor(this)) { return; }
+      } catch (e) {}
+      return nativeClick.apply(this, arguments);
+    };
+
+    var nativeDispatch = EventTarget.prototype.dispatchEvent;
+    EventTarget.prototype.dispatchEvent = function (ev) {
+      try {
+        if (ev && ev.type === 'click' && this instanceof HTMLAnchorElement && blockAnchor(this)) {
+          return false;
+        }
+      } catch (e) {}
+      return nativeDispatch.apply(this, arguments);
+    };
+
+    window.addEventListener('click', function (e) {
+      try {
+        if (e.isTrusted === false) {
+          var n = e.target;
+          var a = (n && n.closest) ? n.closest('a') : null;
+          if (a && blockAnchor(a)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }
+      } catch (err) {}
+    }, true);
+  } catch (e) {}
+})();
+)SPPG";
+    NSString *tpl = [NSString stringWithUTF8String:js];
+    NSData *d = [NSJSONSerialization dataWithJSONObject:SP_PopupAllowHosts() options:0 error:nil];
+    NSString *arr = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"[]";
+    return [tpl stringByReplacingOccurrencesOfString:@"__SP_ALLOW__" withString:arr];
 }
 
 #pragma mark - Ad blocking engine
@@ -913,6 +1145,14 @@ static void SP_InstallScripts(WKWebView *wv) {
         [SP_TrackedUccs() addObject:ucc];
         SP_AttachAll(ucc);
 
+        if (SP_Pref(@"SPPlusPopupGuard", YES)) {
+            WKUserScript *guard =
+                [[WKUserScript alloc] initWithSource:SP_PopupGuardJS()
+                                       injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                    forMainFrameOnly:NO];
+            [ucc addUserScript:guard];
+        }
+
         if (SP_Pref(@"SPPlusForceCopy", YES)) {
             WKUserScript *script =
                 [[WKUserScript alloc] initWithSource:SP_ForceCopyJS()
@@ -952,6 +1192,13 @@ static void SP_InstallScripts(WKWebView *wv) {
     %orig;
     if (delegate) {
         SP_PatchDelegateClass([(NSObject *)delegate class]);
+    }
+}
+
+- (void)setUIDelegate:(id<WKUIDelegate>)delegate {
+    %orig;
+    if (delegate) {
+        SP_PatchUIDelegateClass([(NSObject *)delegate class]);
     }
 }
 
